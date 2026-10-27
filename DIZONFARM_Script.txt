@@ -1,0 +1,240 @@
+const KEY="dizonFarmSystemV1";
+const defaultEquipment=[
+{id:1,unit:"YH-001",name:"Yanmar Harvester",brand:"Yanmar",type:"Harvester",capacity:"1.2 ha/hr",engine:"Diesel 4-cylinder",fuel:"Diesel",tank:"55 L",year:"2024",rate:7000,warranty:"1 Year",insurance:"Insured",status:"Available",quantity:1,image:"https://images.unsplash.com/photo-1592982537447-6f2a6a0a6b3c?auto=format&fit=crop&w=900&q=80"},
+{id:2,unit:"YH-002",name:"Yanmar Harvester",brand:"Yanmar",type:"Harvester",capacity:"1.2 ha/hr",engine:"Diesel 4-cylinder",fuel:"Diesel",tank:"55 L",year:"2023",rate:7000,warranty:"1 Year",insurance:"Insured",status:"Available",quantity:1,image:"https://images.unsplash.com/photo-1625246333195-78d9c38ad449?auto=format&fit=crop&w=900&q=80"},
+{id:3,unit:"MF-001",name:"Massey Ferguson Tractor",brand:"Massey Ferguson",type:"Tractor",capacity:"2.5 tons",engine:"Diesel 4-cylinder",fuel:"Diesel",tank:"60 L",year:"2024",rate:4000,warranty:"1 Year",insurance:"Insured",status:"Available",quantity:1,image:"https://images.unsplash.com/photo-1590682680695-43b964a3ae17?auto=format&fit=crop&w=900&q=80"}
+];
+let db=JSON.parse(localStorage.getItem(KEY)||"null")||{users:[],equipment:defaultEquipment,bookings:[],payments:[],reviews:[],notifications:[]};
+db.notifications=db.notifications||[];
+db.equipment=(db.equipment||[]).map(e=>({...e,quantity:Math.max(1,Number(e.quantity||1))}));
+let session=JSON.parse(localStorage.getItem(KEY+"_session")||"null");
+let currentPage="dashboard", selectedEquipment=null, bookingDraft={}, bookingStep=1;
+
+function save(){localStorage.setItem(KEY,JSON.stringify(db))}
+function money(n){return "₱"+Number(n||0).toLocaleString("en-PH")}
+function toast(msg,type="success"){
+ const host=document.getElementById("toast");
+ if(!host){alert(msg);return;}
+ // Each popup gets its own element so multiple notifications do not overwrite one another.
+ const item=document.createElement("div");
+ item.className="toast-message "+(type==="error"?"error":"success");
+ item.setAttribute("role",type==="error"?"alert":"status");
+ item.setAttribute("aria-live",type==="error"?"assertive":"polite");
+ item.textContent=msg;
+ host.appendChild(item);
+ requestAnimationFrame(()=>item.classList.add("show"));
+ const timer=setTimeout(()=>{
+   item.classList.remove("show");
+   setTimeout(()=>item.remove(),250);
+ },5000);
+ item.addEventListener("click",()=>{clearTimeout(timer);item.remove();});
+}
+function notifyAndToast(userId,title,message,type){
+ addNotification(userId,title,message,type);
+ toast(title+": "+message,"success");
+}
+function escapeHtml(s=""){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
+function currentUser(){return session?.role==="farmer"?db.users.find(u=>u.id===session.userId):null}
+function init(){
+  document.querySelectorAll(".auth-tab").forEach(b=>b.onclick=()=>switchAuth(b.dataset.auth));
+  document.getElementById("loginForm").onsubmit=login;
+  document.getElementById("registerForm").onsubmit=register;
+  document.getElementById("adminForm").onsubmit=adminLogin;
+  document.getElementById("forgotBtn").onclick=forgotPassword;
+  document.getElementById("logoutBtn").onclick=logout;
+  document.getElementById("mobileMenu").onclick=()=>document.getElementById("sidebar").classList.toggle("open");
+  if(session) showApp(); else showAuth();
+}
+function switchAuth(type){
+ document.querySelectorAll(".auth-tab").forEach(x=>x.classList.toggle("active",x.dataset.auth===type));
+ ["login","register","admin"].forEach(x=>document.getElementById(x+"Form").classList.toggle("hidden",x!==type));
+}
+function showAuth(){document.getElementById("authScreen").classList.remove("hidden");document.getElementById("app").classList.add("hidden")}
+function showApp(){
+ document.getElementById("authScreen").classList.add("hidden");document.getElementById("app").classList.remove("hidden");
+ buildNav();updateUser();render();
+}
+function buildNav(){
+ const admin=session.role==="admin";
+ const items=admin?[
+ ["dashboard","▦","Dashboard"],["bookings","▣","Manage Bookings"],["equipment","🚜","Manage Equipment"],["payments","₱","Payments"],["reports","▥","Reports"]
+ ]:[
+ ["dashboard","⌂","Dashboard"],["equipment","🚜","Equipment"],["bookings","▣","My Bookings"],["payments","₱","Payments"],["notifications","🔔","Notifications"],["profile","◉","Profile"],["about","i","About Us"],["support","☎","Contact Support"],["terms","✓","Terms & Conditions"]
+ ];
+ const unread=session.role==="farmer"?db.notifications.filter(n=>n.userId===session.userId&&!n.read).length:0;
+ document.getElementById("navMenu").innerHTML=items.map(i=>`<button class="nav-btn ${currentPage===i[0]?"active":""}" onclick="navigate('${i[0]}')">${i[1]} &nbsp; ${i[2]}${i[0]==="notifications"&&unread?` <span class="nav-count">${unread}</span>`:""}</button>`).join("");
+}
+function updateUser(){
+ const n=session.role==="admin"?"Administrator":(currentUser()?.fullName||"Farmer");
+ document.getElementById("topUserName").textContent=n;
+ const av=document.getElementById("topAvatar"),u=currentUser();
+ av.innerHTML=u?.image?`<img src="${u.image}">`:"👤";
+}
+function navigate(page){currentPage=page;document.getElementById("sidebar").classList.remove("open");buildNav();render()}
+function render(){
+ const title={dashboard:"Dashboard",equipment:session.role==="admin"?"Manage Equipment":"Equipment",bookings:session.role==="admin"?"Manage Bookings":"My Bookings",payments:"Payments",notifications:"Notifications",profile:"My Profile",about:"About Us",support:"Contact Support",terms:"Terms & Conditions",reports:"Reports & Analytics"}[currentPage]||"Dashboard";
+ document.getElementById("pageTitle").textContent=title;
+ const c=document.getElementById("content");
+ if(currentPage==="dashboard")c.innerHTML=session.role==="admin"?adminDashboard():farmerDashboard();
+ else if(currentPage==="equipment")c.innerHTML=session.role==="admin"?adminEquipment():equipmentPage();
+ else if(currentPage==="bookings")c.innerHTML=bookingsPage();
+ else if(currentPage==="payments")c.innerHTML=paymentsPage();
+ else if(currentPage==="notifications")c.innerHTML=notificationsPage();
+ else if(currentPage==="profile")c.innerHTML=profilePage();
+ else if(currentPage==="about")c.innerHTML=aboutPage();
+ else if(currentPage==="support")c.innerHTML=supportPage();
+ else if(currentPage==="terms")c.innerHTML=termsPage();
+ else if(currentPage==="reports")c.innerHTML=reportsPage();
+ bindPage();
+}
+function farmerDashboard(){
+ const u=currentUser(), active=db.bookings.filter(b=>b.userId===u.id&&["Pending","Confirmed"].includes(b.status)).length;
+ return `<div class="hero"><div><h1>Welcome, ${escapeHtml(u?.fullName||"Farmer")}!</h1><p>Reserve reliable farm equipment for your rice field operations. Check availability, submit bookings, and keep your payment records organized.</p><button class="primary-btn" onclick="navigate('equipment')">View Equipment</button></div></div>
+ <div class="stats"><div class="stat"><small>Available Equipment</small><h3>${db.equipment.reduce((sum,e)=>sum+availableUnits(e.id),0)}</h3></div><div class="stat"><small>My Active Bookings</small><h3>${active}</h3></div><div class="stat"><small>Completed Bookings</small><h3>${db.bookings.filter(b=>b.userId===u.id&&b.status==="Completed").length}</h3></div><div class="stat"><small>Total Paid</small><h3>${money(db.payments.filter(p=>p.userId===u.id&&p.status==="Paid").reduce((a,p)=>a+p.amount,0))}</h3></div></div>
+ <div class="section-head"><div><h3>Available Machines</h3><p>Choose equipment for your farm operation.</p></div><button class="secondary-btn" onclick="navigate('equipment')">See All</button></div>${equipmentCards(db.equipment.slice(0,3))}`;
+}
+function adminDashboard(){
+ const revenue=db.payments.filter(p=>p.status==="Paid").reduce((a,p)=>a+p.amount,0);
+ return `<div class="hero"><div><h1>Fleet Monitoring Dashboard</h1><p>Manage equipment, bookings, payments, and farm equipment operations from one place.</p><button class="primary-btn" onclick="navigate('bookings')">Manage Bookings</button></div></div>
+ <div class="stats"><div class="stat"><small>Total Equipment</small><h3>${db.equipment.reduce((sum,e)=>sum+totalUnits(e),0)}</h3></div><div class="stat"><small>Available Units</small><h3>${db.equipment.reduce((sum,e)=>sum+availableUnits(e.id),0)}</h3></div><div class="stat"><small>Active Bookings</small><h3>${db.bookings.filter(b=>["Pending","Confirmed"].includes(b.status)).length}</h3></div><div class="stat"><small>Total Revenue</small><h3>${money(revenue)}</h3></div></div>
+ <div class="section-head"><div><h3>Recent Bookings</h3><p>Latest reservations from farmers.</p></div></div>${bookingTable(db.bookings.slice(-5).reverse(),true)}`;
+}
+function equipmentCards(list){
+ if(!list.length)return `<div class="empty">No equipment found.</div>`;
+ return `<div class="equipment-grid">${list.map(e=>{const available=availableUnits(e.id),total=totalUnits(e),canBook=available>0&&e.status==="Available";return `<article class="equipment-card"><div class="equipment-img"><img src="${e.image||""}" onerror="this.style.display='none'"><span class="status-pill ${!canBook?"unavailable":""}">${canBook?"Available":"Unavailable"}</span></div><div class="equipment-body"><h3>${escapeHtml(e.name)}</h3><p>${escapeHtml(e.brand)} • ${escapeHtml(e.type)} • ${escapeHtml(e.capacity)}</p><div class="details"><div><b>Fuel</b><br>${escapeHtml(e.fuel)}</div><div><b>Year</b><br>${escapeHtml(e.year)}</div><div><b>Availability</b><br>${available} / ${total} unit(s)</div><div><b>Reserved</b><br>${Math.max(0,total-available)} unit(s)</div></div><div class="price">${money(e.rate)} <small>/ rental</small></div><div class="card-actions"><button class="secondary-btn" onclick="viewEquipment(${e.id})">VIEW MORE</button><button class="primary-btn" ${!canBook?"disabled":""} onclick="startBooking(${e.id})">BOOK NOW</button></div></div></article>`}).join("")}</div>`;
+}
+function equipmentPage(){
+ return `<div class="toolbar"><input id="equipmentSearch" placeholder="Search machines..." value="${escapeHtml(window.eqSearch||"")}"><select id="typeFilter"><option value="">All Types</option><option>Harvester</option><option>Tractor</option></select><select id="priceFilter"><option value="">All Prices</option><option value="4000">₱4,000 and below</option><option value="7000">₱7,000 and below</option></select></div><div id="equipmentResults">${equipmentCards(filterEquipment())}</div>`;
+}
+function filterEquipment(){
+ const q=(window.eqSearch||"").toLowerCase(),type=window.eqType||"",price=window.eqPrice||"";
+ return db.equipment.filter(e=>(!q||`${e.name} ${e.brand} ${e.type}`.toLowerCase().includes(q))&&(!type||e.type===type)&&(!price||e.rate<=Number(price)));
+}
+function bindPage(){
+ const s=document.getElementById("equipmentSearch"),t=document.getElementById("typeFilter"),p=document.getElementById("priceFilter");
+ if(s){s.oninput=()=>{window.eqSearch=s.value;document.getElementById("equipmentResults").innerHTML=equipmentCards(filterEquipment())};t.onchange=()=>{window.eqType=t.value;document.getElementById("equipmentResults").innerHTML=equipmentCards(filterEquipment())};p.onchange=()=>{window.eqPrice=p.value;document.getElementById("equipmentResults").innerHTML=equipmentCards(filterEquipment())}}
+}
+function viewEquipment(id){
+ const e=db.equipment.find(x=>x.id===id);if(!e)return;
+ showModal(`<div class="modal-head"><h2>${escapeHtml(e.name)}</h2><button class="close" onclick="closeModal()">✕</button></div><img src="${e.image}" style="width:100%;height:220px;object-fit:cover;border-radius:14px"><div class="details" style="margin-top:15px"><div><b>Unit</b><br>${e.unit}</div><div><b>Brand</b><br>${e.brand}</div><div><b>Type</b><br>${e.type}</div><div><b>Capacity</b><br>${e.capacity}</div><div><b>Engine</b><br>${e.engine}</div><div><b>Fuel Tank</b><br>${e.tank}</div><div><b>Year Model</b><br>${e.year}</div><div><b>Warranty</b><br>${e.warranty}</div><div><b>Insurance</b><br>${e.insurance}</div><div><b>Price</b><br>${money(e.rate)}</div></div><div class="notice">Available units: ${availableUnits(e.id)}. Booked dates are shown in the booking calendar.</div><div class="card-actions"><button class="primary-btn" onclick="closeModal();startBooking(${e.id})">BOOK NOW</button></div>`);
+}
+function totalUnits(e){return Math.max(1,Number(e?.quantity||1))}
+function activeBookingsForEquipment(eid){return db.bookings.filter(b=>b.equipmentId===eid&&["Pending","Confirmed"].includes(b.status))}
+function availableUnits(eid){const e=db.equipment.find(x=>x.id===eid);if(!e||e.status!=="Available")return 0;return Math.max(0,totalUnits(e)-activeBookingsForEquipment(eid).length)}
+function availableUnitsOnDate(eid,date){const e=db.equipment.find(x=>x.id===eid);if(!e||e.status!=="Available")return 0;const booked=db.bookings.filter(b=>b.equipmentId===eid&&b.date===date&&["Pending","Confirmed"].includes(b.status)).length;return Math.max(0,totalUnits(e)-booked)}
+function addNotification(userId,title,message,type){db.notifications.push({id:Date.now()+Math.floor(Math.random()*10000),userId,title,message,type:type||"info",createdAt:new Date().toISOString(),read:false})}
+function startBooking(id){if(session.role!=="farmer"){toast("Only farmers can create bookings.","error");return}selectedEquipment=db.equipment.find(e=>e.id===id);if(!selectedEquipment||availableUnits(id)<=0){toast("No units are currently available for this equipment.","error");return}bookingStep=1;bookingDraft={equipmentId:id};openBooking()}
+function openBooking(){renderBookingModal()}
+function renderBookingModal(){
+ const e=selectedEquipment,d=bookingDraft;if(!e){closeModal();return}
+ let body="";
+ if(bookingStep===1)body=`<div class="booking-steps"><div class="step active">1. Date & Location</div><div class="step">2. Summary & Payment</div><div class="step">3. Confirmation</div></div>
+ <div class="notice booking-availability"><b>Available: ${availableUnits(e.id)} of ${totalUnits(e)} unit(s)</b><br>Choose your preferred date and complete all required fields.</div>
+ <div class="form-grid"><div class="form-group"><label>Date *</label><input class="form-control" id="bDate" type="date" min="${new Date().toISOString().slice(0,10)}" value="${d.date||""}"></div><div class="form-group"><label>Time *</label><input class="form-control" id="bTime" type="time" value="${d.time||""}"></div><div class="form-group"><label>Hectare Area *</label><input class="form-control" id="bHa" type="number" min="0.1" step="0.1" value="${d.ha||""}" placeholder="e.g. 2"></div><div class="form-group"><label>Purok *</label><input class="form-control" id="bPurok" value="${escapeHtml(d.purok||"")}"></div><div class="form-group"><label>Barangay *</label><input class="form-control" id="bBarangay" value="${escapeHtml(d.barangay||"")}"></div><div class="form-group"><label>Municipality *</label><input class="form-control" id="bMunicipality" value="${escapeHtml(d.municipality||"")}"></div></div>
+ <div class="section-head"><div><h3>Availability Calendar</h3><p>Red = fully reserved. Green = available.</p></div></div>${calendar(e.id,d.date)}<div class="card-actions"><button type="button" class="secondary-btn" onclick="closeModal()">CANCEL</button><button type="button" class="primary-btn" onclick="nextBooking()">NEXT STEP</button></div>`;
+ else if(bookingStep===2)body=`<div class="booking-steps"><div class="step active">1. Date & Location</div><div class="step active">2. Summary & Payment</div><div class="step">3. Confirmation</div></div><h3>Booking Summary</h3><div class="notice" style="margin:12px 0">${escapeHtml(e.name)} • ${d.date} • ${d.time}<br>${d.ha} hectare(s) • ${escapeHtml(d.purok)}, ${escapeHtml(d.barangay)}, ${escapeHtml(d.municipality)}<br><strong>Total: ${money(e.rate)}</strong></div><h3 style="margin:16px 0 10px">Payment Method</h3><div class="payment-choice"><label><input type="radio" name="pay" value="GCash" ${d.payment==="GCash"||!d.payment?"checked":""}> GCash</label><label><input type="radio" name="pay" value="Maya" ${d.payment==="Maya"?"checked":""}> Maya</label><label><input type="radio" name="pay" value="Cash" ${d.payment==="Cash"?"checked":""}> Cash</label></div><p class="notice" style="margin-top:12px">Payment method will be recorded with your booking.</p><div class="card-actions"><button type="button" class="secondary-btn" onclick="bookingStep=1;renderBookingModal()">BACK</button><button type="button" class="primary-btn" onclick="nextPayment()">CONTINUE</button></div>`;
+ else body=`<div class="booking-steps"><div class="step active">1. Date & Location</div><div class="step active">2. Summary & Payment</div><div class="step active">3. Confirmation</div></div><div style="text-align:center;padding:15px"><div style="font-size:50px">✓</div><h2>Ready to File Booking</h2><p style="color:var(--muted);margin:8px 0 18px">Review your reservation before submitting.</p></div><div class="notice"><b>${escapeHtml(e.name)}</b><br>Date: ${d.date}<br>Time: ${d.time}<br>Hectare Area: ${d.ha}<br>Location: ${escapeHtml(d.purok)}, ${escapeHtml(d.barangay)}, ${escapeHtml(d.municipality)}<br>Payment: ${escapeHtml(d.payment)}<br>Total: <b>${money(e.rate)}</b></div><div class="card-actions"><button type="button" class="secondary-btn" onclick="bookingStep=2;renderBookingModal()">BACK</button><button type="button" class="primary-btn" onclick="confirmBooking()">FILE BOOKING</button></div>`;
+ showModal(`<div class="modal-head"><h2>Book Equipment</h2><button class="close" onclick="closeModal()">✕</button></div>${body}`)
+}
+function calendar(eid,selected){const now=new Date(),y=now.getFullYear(),m=now.getMonth(),first=new Date(y,m,1).getDay(),days=new Date(y,m+1,0).getDate(),names=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];let h='<div class="calendar">'+names.map(x=>`<div class="cal-head">${x}</div>`).join("");for(let i=0;i<first;i++)h+="<div></div>";for(let day=1;day<=days;day++){let dt=`${y}-${String(m+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`,isB=availableUnitsOnDate(eid,dt)<=0,isS=selected===dt;h+=`<div class="cal-day ${isB?"booked":"available"} ${isS?"selected":""}">${day}${isB?"<br><small>Fully booked</small>":""}</div>`}return h+"</div>"}
+function nextBooking(){
+ try{
+  if(!selectedEquipment){toast("Please select equipment first.","error");return false}
+  const ids=["bDate","bTime","bHa","bPurok","bBarangay","bMunicipality"],v={};
+  ids.forEach(id=>{const el=document.getElementById(id);v[id]=el?String(el.value||"").trim():""});
+  if(ids.some(id=>!v[id])){toast("Please complete all required booking fields.","error");return false}
+  if(Number(v.bHa)<=0){toast("Hectare area must be greater than zero.","error");return false}
+  const chosen=new Date(v.bDate+"T"+v.bTime);
+  if(Number.isNaN(chosen.getTime())){toast("Please enter a valid date and time.","error");return false}
+  if(chosen.getTime()<Date.now()){toast("Please choose a future date and time.","error");return false}
+  if(availableUnits(selectedEquipment.id)<=0){toast("This equipment is no longer available.","error");return false}
+  if(availableUnitsOnDate(selectedEquipment.id,v.bDate)<=0){toast("That date is fully reserved. Please select another date.","error");return false}
+  bookingDraft={...bookingDraft,equipmentId:selectedEquipment.id,date:v.bDate,time:v.bTime,ha:v.bHa,purok:v.bPurok,barangay:v.bBarangay,municipality:v.bMunicipality};
+  bookingStep=2;
+  renderBookingModal();
+  toast("Step 1 complete. Review your booking and choose a payment method.","success");
+  return true;
+ }catch(err){console.error(err);toast("Unable to continue. Please check the booking details and try again.","error");return false}
+}
+function nextPayment(){
+ try{
+  const p=document.querySelector('input[name="pay"]:checked');
+  if(!p){toast("Please select a payment method.","error");return false}
+  bookingDraft.payment=p.value;
+  bookingStep=3;
+  renderBookingModal();
+  toast("Payment method saved. Review the confirmation details.","success");
+  return true;
+ }catch(err){console.error(err);toast("Unable to continue to confirmation.","error");return false}
+}
+function confirmBooking(){
+ try{
+  const u=currentUser(),e=selectedEquipment;
+  if(!u){toast("Please log in as a farmer.","error");return false}
+  if(!e){toast("Equipment selection is missing.","error");return false}
+  if(!bookingDraft.date||!bookingDraft.time||!bookingDraft.payment){toast("Please complete all booking steps first.","error");bookingStep=1;renderBookingModal();return false}
+  if(availableUnits(e.id)<=0||availableUnitsOnDate(e.id,bookingDraft.date)<=0){toast("This equipment is no longer available for the selected date.","error");bookingStep=1;renderBookingModal();return false}
+  const now=Date.now(),code="BK-"+String(now).slice(-6),b={id:now,code,userId:u.id,equipmentId:e.id,date:bookingDraft.date,time:bookingDraft.time,ha:Number(bookingDraft.ha),purok:bookingDraft.purok,barangay:bookingDraft.barangay,municipality:bookingDraft.municipality,total:e.rate,payment:bookingDraft.payment,status:"Pending",createdAt:new Date().toISOString()};
+  db.bookings.push(b);
+  const paid=b.payment!=="Cash";
+  db.payments.push({id:now+1,bookingId:b.id,userId:u.id,date:new Date().toISOString().slice(0,10),amount:b.total,method:b.payment,status:paid?"Paid":"Pending",reference:"PAY-"+String(now).slice(-6)});
+  notifyAndToast(u.id,"Order Confirmation",`Your booking ${b.code} for ${e.name} on ${b.date} at ${b.time} was filed successfully.`,"order");
+  notifyAndToast(u.id,"Payment Confirmation",paid?`Payment of ${money(b.total)} via ${b.payment} for ${b.code} was recorded.`:`Your ${b.payment} payment method for ${b.code} was recorded and is pending confirmation.`,"payment");
+  save();
+  closeModal();
+  toast(`Booking ${b.code} filed successfully! Availability updated.`,"success");
+  navigate("bookings");
+  return true;
+ }catch(err){console.error(err);toast("Booking could not be filed. Please try again.","error");return false}
+}
+
+function bookingTable(list,admin=false){
+ if(!list.length)return `<div class="empty">No bookings found.</div>`;
+ return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Booking</th><th>Customer</th><th>Equipment</th><th>Date</th><th>Hectares</th><th>Payment</th><th>Status</th><th>Action</th></tr></thead><tbody>${list.map(b=>{let u=db.users.find(x=>x.id===b.userId),e=db.equipment.find(x=>x.id===b.equipmentId);return `<tr><td><b>${b.code}</b></td><td>${escapeHtml(u?.fullName||"Unknown")}</td><td>${escapeHtml(e?.name||"")}</td><td>${b.date}</td><td>${b.ha}</td><td>${b.payment}</td><td><span class="badge ${b.status==="Confirmed"?"green":b.status==="Cancelled"?"red":"yellow"}">${b.status}</span></td><td>${admin?`<button class="secondary-btn" onclick="adminBooking(${b.id})">Manage</button>`:`<button class="secondary-btn" onclick="userBooking(${b.id})">View</button>`}</td></tr>`}).join("")}</tbody></table></div>`
+}
+function bookingsPage(){const list=session.role==="admin"?db.bookings:db.bookings.filter(b=>b.userId===currentUser().id);return `<div class="section-head"><div><h3>${session.role==="admin"?"Manage Bookings":"My Bookings"}</h3><p>Track reservations and booking status.</p></div>${session.role==="farmer"?'<button class="primary-btn" onclick="navigate(\'equipment\')">+ New Booking</button>':""}</div>${bookingTable(list,session.role==="admin")}`}
+function userBooking(id){const b=db.bookings.find(x=>x.id===id);showModal(`<div class="modal-head"><h2>${b.code}</h2><button class="close" onclick="closeModal()">✕</button></div><div class="notice">Equipment: ${escapeHtml(db.equipment.find(e=>e.id===b.equipmentId)?.name||"")}<br>Date: ${b.date}<br>Time: ${b.time}<br>Location: ${escapeHtml(b.barangay)}, ${escapeHtml(b.municipality)}<br>Hectares: ${b.ha}<br>Total: ${money(b.total)}<br>Status: <b>${b.status}</b></div><div class="card-actions">${["Pending","Confirmed"].includes(b.status)?`<button class="danger-btn" onclick="cancelBooking(${b.id})">CANCEL BOOKING</button>`:""}<button class="secondary-btn" onclick="closeModal()">CLOSE</button></div>`)}
+function adminBooking(id){const b=db.bookings.find(x=>x.id===id),u=db.users.find(x=>x.id===b.userId),e=db.equipment.find(x=>x.id===b.equipmentId);showModal(`<div class="modal-head"><h2>Manage ${b.code}</h2><button class="close" onclick="closeModal()">✕</button></div><div class="notice">Customer: ${escapeHtml(u?.fullName||"")}<br>Phone: ${escapeHtml(u?.phone||"")}<br>Equipment: ${escapeHtml(e?.name||"")}<br>Date: ${b.date}<br>Location: ${escapeHtml(b.purok)}, ${escapeHtml(b.barangay)}, ${escapeHtml(b.municipality)}<br>Payment: ${b.payment}<br>Total: ${money(b.total)}</div><label style="display:block;margin-top:15px;font-weight:700;font-size:13px">Status</label><select id="adminStatus" class="form-control"><option ${b.status==="Pending"?"selected":""}>Pending</option><option ${b.status==="Confirmed"?"selected":""}>Confirmed</option><option ${b.status==="Completed"?"selected":""}>Completed</option><option ${b.status==="Cancelled"?"selected":""}>Cancelled</option></select><div class="card-actions"><button class="primary-btn" onclick="saveBookingStatus(${b.id})">SAVE STATUS</button><button class="secondary-btn" onclick="closeModal()">CLOSE</button></div>`)}
+function saveBookingStatus(id){const b=db.bookings.find(x=>x.id===id);if(!b)return;const old=b.status;b.status=document.getElementById("adminStatus").value;if(old!==b.status){addNotification(b.userId,"Order Confirmation",`Your booking ${b.code} is now ${b.status.toLowerCase()}.`,"order")}save();closeModal();toast("Booking status updated.");render()}
+function cancelBooking(id){const b=db.bookings.find(x=>x.id===id);if(!b)return;b.status="Cancelled";addNotification(b.userId,"Order Confirmation",`Your booking ${b.code} was cancelled. The equipment unit is available again.`,"order");save();closeModal();toast("Booking cancelled. Availability restored.");render()}
+function paymentsPage(){
+ const list=session.role==="admin"?db.payments:db.payments.filter(p=>p.userId===currentUser().id);
+ return `<div class="section-head"><div><h3>Payment Records</h3><p>Organized payment inventory for completed transactions.</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Payment ID</th><th>Booking</th><th>Date</th><th>Amount</th><th>Method</th><th>Status</th></tr></thead><tbody>${list.length?list.map(p=>{let b=db.bookings.find(x=>x.id===p.bookingId);return `<tr><td>${p.reference}</td><td>${b?.code||"-"}</td><td>${p.date}</td><td>${money(p.amount)}</td><td>${p.method}</td><td><span class="badge ${p.status==="Paid"?"green":"yellow"}">${p.status}</span></td></tr>`}).join(""):`<tr><td colspan="6" style="text-align:center">No payment records.</td></tr>`}</tbody></table></div>`
+}
+function profilePage(){const u=currentUser();return `<div class="profile-grid"><div class="panel profile-card"><div class="profile-large">${u?.image?`<img src="${u.image}">`:"👤"}</div><h3>${escapeHtml(u.fullName)}</h3><p style="color:var(--muted);font-size:12px">@${escapeHtml(u.username)}</p><p style="margin-top:15px;font-size:12px">${escapeHtml(u.email)}<br>${escapeHtml(u.phone)}</p></div><div class="panel"><h3>Personal Information</h3><div class="form-grid" style="margin-top:15px"><div class="form-group"><label>Name</label><input class="form-control" value="${escapeHtml(u.fullName)}" id="pName"></div><div class="form-group"><label>Age</label><input class="form-control" id="pAge" value="${escapeHtml(u.age||"")}"></div><div class="form-group full-row"><label>Address</label><input class="form-control" id="pAddress" value="${escapeHtml(u.address||"")}"></div></div><button class="primary-btn" style="margin-top:15px" onclick="saveProfile()">SAVE PROFILE</button><hr style="border:0;border-top:1px solid var(--border);margin:25px 0"><h3>Change Password</h3><div class="form-grid" style="margin-top:15px"><div class="form-group"><label>Current Password</label><input class="form-control" type="password" id="oldPass"></div><div class="form-group"><label>New Password</label><input class="form-control" type="password" id="newPass"></div><div class="form-group"><label>Confirm Password</label><input class="form-control" type="password" id="confirmPass"></div></div><button class="primary-btn" style="margin-top:15px" onclick="changePassword()">CHANGE PASSWORD</button></div></div>`}
+function saveProfile(){const u=currentUser();u.fullName=document.getElementById("pName").value.trim();u.age=document.getElementById("pAge").value.trim();u.address=document.getElementById("pAddress").value.trim();notifyAndToast(u.id,"Profile Update","Your profile information was updated successfully.","profile");save();updateUser();render()}
+function changePassword(){const u=currentUser(),o=document.getElementById("oldPass").value,n=document.getElementById("newPass").value,c=document.getElementById("confirmPass").value;if(o!==u.password)return toast("Current password is incorrect.","error");if(n.length<6||n!==c)return toast("New passwords must match and contain at least 6 characters.","error");u.password=n;notifyAndToast(u.id,"Change Password","Your account password was changed successfully.","security");save()}
+function notificationsPage(){
+ const u=currentUser();
+ const list=db.notifications.filter(n=>n.userId===u?.id).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+ list.forEach(n=>n.read=true); save();
+ const rows=list.map(n=>{
+   const icon=n.type==="payment"?"₱":n.type==="security"?"🔒":n.type==="profile"?"👤":"✓";
+   return `<div class="notification-item"><div class="notification-icon">${icon}</div><div><b>${escapeHtml(n.title)}</b><p>${escapeHtml(n.message)}</p><small>${new Date(n.createdAt).toLocaleString("en-PH")}</small></div></div>`;
+ }).join("");
+ return `<div class="panel"><div class="section-head"><div><h3>Notifications</h3><p>Order, payment, profile, and security notifications.</p></div></div>${rows||`<div class="empty">No notifications yet.</div>`}</div>`;
+}
+function aboutPage(){return `<div class="panel"><h2>About Dizon Farm Equipment Management System</h2><p style="margin-top:12px;line-height:1.8;color:var(--muted)">The Operational Framework for Dizon Farm Equipment Management System is a centralized platform designed to help farmers reserve agricultural machinery more conveniently. The system organizes equipment availability, booking schedules, payments, and transaction records while giving administrators tools to monitor farm equipment operations.</p></div>`}
+function supportPage(){return `<div class="panel"><h2>Contact Support</h2><p style="color:var(--muted);margin:8px 0 20px">For questions about equipment reservations and transactions, contact the farm support team.</p><div class="stats"><div class="stat"><small>Smart</small><h3>09771093589</h3></div><div class="stat"><small>Globe</small><h3>09304898851</h3></div><div class="stat"><small>DITO</small><h3>09985198524</h3></div></div></div>`}
+function termsPage(){return `<div class="panel"><h2>Terms & Conditions</h2><div style="line-height:1.8;color:var(--muted);margin-top:12px"><p>1. Farmers must provide accurate information when registering and booking.</p><p>2. Equipment shall be used only for lawful agricultural purposes.</p><p>3. The farmer is responsible for following the equipment operator's safety instructions.</p><p>4. Damage caused by misuse may be subject to additional charges.</p><p>5. Reservations are subject to equipment availability and administrator approval.</p><p>6. Cancellation and rescheduling are subject to the farm's booking policy.</p></div></div>`}
+function reportsPage(){const revenue=db.payments.filter(p=>p.status==="Paid").reduce((a,p)=>a+p.amount,0),months=["Jan","Feb","Mar","Apr","May","Jun"],vals=months.map((m,i)=>Math.round(revenue*(i+1)/21));return `<div class="stats"><div class="stat"><small>Total Revenue</small><h3>${money(revenue)}</h3></div><div class="stat"><small>Total Bookings</small><h3>${db.bookings.length}</h3></div><div class="stat"><small>Completed</small><h3>${db.bookings.filter(b=>b.status==="Completed").length}</h3></div><div class="stat"><small>Cancelled</small><h3>${db.bookings.filter(b=>b.status==="Cancelled").length}</h3></div></div><div class="report-grid"><div class="panel"><div class="section-head"><h3>Revenue Chart</h3><select class="form-control" style="width:auto"><option>Monthly</option><option>Yearly</option></select></div><div class="chart">${vals.map((v,i)=>`<div class="bar" style="height:${Math.max(10,v/(Math.max(...vals)||1)*180)}px"><em>${money(v)}</em><span>${months[i]}</span></div>`).join("")}</div></div><div class="panel"><h3>Most Booked Equipment</h3>${db.equipment.map(e=>`<div style="padding:14px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;font-size:13px"><b>${escapeHtml(e.name)}</b><span>${db.bookings.filter(b=>b.equipmentId===e.id).length} bookings</span></div>`).join("")}<button class="secondary-btn" style="margin-top:18px" onclick="toast('PDF/Excel export requires a backend or export library in the production version.')">EXPORT PDF / EXCEL</button></div></div>`}
+function adminEquipment(){return `<div class="section-head"><div><h3>Manage Equipment</h3><p>Add, edit, or monitor equipment units.</p></div><button class="primary-btn" onclick="equipmentForm()">+ ADD NEW EQUIPMENT</button></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Unit</th><th>Brand</th><th>Type</th><th>Rate</th><th>Availability</th><th>Status</th><th>Bookings</th><th>Action</th></tr></thead><tbody>${db.equipment.map(e=>`<tr><td>${e.unit}</td><td>${e.brand}</td><td>${e.type}</td><td>${money(e.rate)}</td><td><span class="badge ${availableUnits(e.id)>0?"green":"yellow"}">${availableUnits(e.id)} / ${totalUnits(e)} available</span></td><td><span class="badge ${e.status==="Available"?"green":"yellow"}">${e.status}</span></td><td>${db.bookings.filter(b=>b.equipmentId===e.id).length}</td><td><div class="card-actions"><button class="secondary-btn" onclick="equipmentForm(${e.id})">EDIT</button><button class="danger-btn" onclick="deleteEquipment(${e.id})">DELETE</button></div></td></tr>`).join("")}</tbody></table></div>`}
+function equipmentForm(id=null){const e=id?db.equipment.find(x=>x.id===id):{unit:"",name:"",brand:"",type:"Harvester",capacity:"",engine:"",fuel:"Diesel",tank:"",year:"2026",rate:7000,quantity:1,warranty:"1 Year",insurance:"Insured",image:"https://images.unsplash.com/photo-1625246333195-78d9c38ad449?auto=format&fit=crop&w=900&q=80",status:"Available"};showModal(`<div class="modal-head"><h2>${id?"Edit":"Add"} Equipment</h2><button class="close" onclick="closeModal()">✕</button></div><div class="form-grid">${["unit","name","brand","capacity","engine","tank","year","rate","quantity","warranty","insurance","image"].map(k=>`<div class="form-group"><label>${k.replace(/^\w/,x=>x.toUpperCase())}</label><input class="form-control" id="e_${k}" value="${escapeHtml(e[k])}"></div>`).join("")}<div class="form-group"><label>Type</label><select class="form-control" id="e_type"><option ${e.type==="Harvester"?"selected":""}>Harvester</option><option ${e.type==="Tractor"?"selected":""}>Tractor</option></select></div><div class="form-group"><label>Status</label><select class="form-control" id="e_status"><option ${e.status==="Available"?"selected":""}>Available</option><option ${e.status==="Maintenance"?"selected":""}>Maintenance</option><option ${e.status==="Unavailable"?"selected":""}>Unavailable</option></select></div></div><div class="card-actions"><button class="primary-btn" onclick="saveEquipment(${id||0})">SAVE EQUIPMENT</button><button class="secondary-btn" onclick="closeModal()">CANCEL</button></div>`)}
+function saveEquipment(id){const keys=["unit","name","brand","capacity","engine","tank","year","rate","quantity","warranty","insurance","image"],o={};keys.forEach(k=>o[k]=document.getElementById("e_"+k).value);o.rate=Number(o.rate)||0;o.quantity=Math.max(1,Number(o.quantity)||1);o.type=document.getElementById("e_type").value;o.fuel="Diesel";o.status=document.getElementById("e_status").value;if(id){Object.assign(db.equipment.find(e=>e.id===id),o)}else{db.equipment.push({id:Date.now(),...o})}save();closeModal();toast("Equipment saved.");render()}
+function deleteEquipment(id){
+ if(session?.role!=="admin"){toast("Only administrators can delete equipment.","error");return}
+ const equipment=db.equipment.find(e=>e.id===id);if(!equipment){toast("Equipment could not be found.","error");return}
+ const active=db.bookings.filter(b=>b.equipmentId===id&&["Pending","Confirmed"].includes(b.status));
+ if(active.length){toast("Cannot delete this equipment while it has pending or confirmed bookings. Cancel or complete those bookings first.","error");return}
+ if(!confirm(`Delete ${equipment.name} (${equipment.unit})? This action cannot be undone.`))return;
+ db.equipment=db.equipment.filter(e=>e.id!==id);save();toast("Equipment deleted successfully.");render();
+}
+function login(ev){ev.preventDefault();const id=document.getElementById("loginIdentity").value.trim().toLowerCase(),p=document.getElementById("loginPassword").value,u=db.users.find(x=>(x.username.toLowerCase()===id||x.email.toLowerCase()===id)&&x.password===p);if(!u)return toast("Invalid username/email or password.","error");session={role:"farmer",userId:u.id};localStorage.setItem(KEY+"_session",JSON.stringify(session));showApp()}
+function register(ev){ev.preventDefault();const name=document.getElementById("regName").value.trim(),username=document.getElementById("regUsername").value.trim(),email=document.getElementById("regEmail").value.trim(),phone=document.getElementById("regPhone").value.trim(),pass=document.getElementById("regPassword").value,confirm=document.getElementById("regConfirm").value;if(pass!==confirm)return toast("Passwords do not match.","error");if(db.users.some(u=>u.username.toLowerCase()===username.toLowerCase()||u.email.toLowerCase()===email.toLowerCase()))return toast("Username or email already exists.","error");const f=document.getElementById("regImage").files[0];const create=img=>{db.users.push({id:Date.now(),fullName:name,username,email,phone,password:pass,image:img||"",age:"",address:""});save();toast("Registration successful. Please login.");switchAuth("login");document.getElementById("loginIdentity").value=username};if(f){const r=new FileReader();r.onload=()=>create(r.result);r.readAsDataURL(f)}else create("")}
+function adminLogin(ev){ev.preventDefault();if(document.getElementById("adminUsername").value==="admin"&&document.getElementById("adminPassword").value==="admin123"){session={role:"admin"};localStorage.setItem(KEY+"_session",JSON.stringify(session));showApp()}else toast("Demo admin credentials: admin / admin123","error")}
+function forgotPassword(){const email=prompt("Enter your registered email:");if(!email)return;const u=db.users.find(x=>x.email.toLowerCase()===email.toLowerCase());if(!u)return toast("Email not found.","error");const code=String(Math.floor(100000+Math.random()*900000));alert("Demo verification code: "+code);const newPass=prompt("Enter verification code:");if(newPass!==code)return toast("Invalid code.","error");const np=prompt("Enter your new password (6+ characters):");if(!np||np.length<6)return toast("Password must be at least 6 characters.","error");u.password=np;save();toast("Password reset successfully.")}
+function logout(){session=null;localStorage.removeItem(KEY+"_session");showAuth();switchAuth("login")}
+function showModal(content){document.getElementById("modalContent").innerHTML=content;document.getElementById("modal").classList.remove("hidden")}
+function closeModal(){document.getElementById("modal").classList.add("hidden")}
+document.getElementById("modal").addEventListener("click",e=>{if(e.target.id==="modal")closeModal()});
+init();
