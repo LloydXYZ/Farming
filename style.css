@@ -999,3 +999,61 @@ button {
 .modal-card select.form-control option:disabled {
   color: #a0aaa4;
 }
+
+/* Weekly payroll */
+.pay-week-label {
+  font-weight: 800;
+  min-width: 230px;
+  text-align: center;
+  color: var(--dark);
+}
+.print-only {
+  display: none;
+}
+@media print {
+  body {
+    background: #fff;
+  }
+  .no-print,
+  .no-print * {
+    display: none !important;
+  }
+  body.printing-week * {
+    visibility: hidden;
+  }
+  body.printing-week #payrollArea,
+  body.printing-week #payrollArea * {
+    visibility: visible;
+  }
+  body.printing-week #payrollArea {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  body.printing-week .print-only {
+    display: block;
+    margin-bottom: 14px;
+  }
+  body.printing-slip * {
+    visibility: hidden;
+  }
+  body.printing-slip .modal-card,
+  body.printing-slip .modal-card * {
+    visibility: visible;
+  }
+  body.printing-slip .modal {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+    padding: 0;
+    background: none;
+    display: block;
+  }
+  body.printing-slip .modal-card {
+    width: 100%;
+    max-height: none;
+    overflow: visible;
+    box-shadow: none;
+  }
+}
