@@ -133,6 +133,7 @@ let db = JSON.parse(localStorage.getItem(KEY) || "null") || {
 db.notifications = db.notifications || [];
 db.workers = db.workers || JSON.parse(JSON.stringify(defaultWorkers));
 db.settings = db.settings || {};
+db.payroll = db.payroll || [];
 if (db.settings.tractorRate === undefined) db.settings.tractorRate = null;
 db.equipment = (db.equipment || []).map((e) => ({
   ...e,
@@ -197,7 +198,58 @@ function seedDemoData() {
   );
   save();
 }
-seedDemoData();
+/* ---------- Demo seed: 3 completed jobs for the payroll example ----------
+   Crew: Ramon Dela Cruz (Operator 101), Jun Reyes (Bagger 111), Mario Bautista (Bagger 112) */
+const PAYROLL_DEMO_IDS = [900101, 900102, 900103];
+function seedPayrollExample() {
+  db.bookings = db.bookings || [];
+  if (db.bookings.some((b) => PAYROLL_DEMO_IDS.includes(b.id))) return;
+  const jobs = [
+    { id: 900101, date: "2026-10-26", ha: 2 },
+    { id: 900102, date: "2026-10-28", ha: 3 },
+    { id: 900103, date: "2026-10-30", ha: 1.5 },
+  ];
+  jobs.forEach((j) => {
+    const total = r2(j.ha * HARVEST_RATE_PER_HA),
+      code = "BK-" + j.id;
+    const b = {
+      id: j.id,
+      code,
+      userId: DEMO_USER_ID,
+      equipmentId: 2,
+      date: j.date,
+      time: "08:00",
+      ha: j.ha,
+      purok: "Purok 1",
+      barangay: "Sample Barangay",
+      municipality: "Sample Municipality",
+      total,
+      service: "Harvester",
+      assignedWorkers: { operatorId: 101, baggerIds: [111, 112] },
+      assignmentFinalized: true,
+      completedHa: j.ha,
+      payment: "GCash",
+      status: "Completed",
+      createdAt: j.date + "T00:00:00.000Z",
+      completedAt: j.date + "T10:00:00.000Z",
+    };
+    snapshotPayroll(b);
+    db.bookings.push(b);
+    db.payments.push({
+      id: j.id + 1000,
+      bookingId: j.id,
+      userId: DEMO_USER_ID,
+      date: j.date,
+      amount: total,
+      method: "GCash",
+      status: "Paid",
+      reference: "PAY-" + j.id,
+    });
+  });
+  save();
+}
+seedPayrollExample();
+backfillPayroll();
 let session = JSON.parse(localStorage.getItem(KEY + "_session") || "null");
 let currentPage = "dashboard",
   selectedEquipment = null,
@@ -295,6 +347,7 @@ function buildNav() {
         ["dashboard", "▦", "Dashboard"],
         ["bookings", "▣", "Manage Bookings"],
         ["workers", "👷", "Workers"],
+        ["payroll", "🧾", "Payroll"],
         ["equipment", "🚜", "Manage Equipment"],
         ["payments", "₱", "Payments"],
         ["reports", "▥", "Reports"],
@@ -333,7 +386,8 @@ function updateUser() {
   av.innerHTML = u?.image ? `<img src="${u.image}">` : "👤";
 }
 function navigate(page) {
-  if (page === "workers" && session?.role !== "admin") return;
+  if ((page === "workers" || page === "payroll") && session?.role !== "admin")
+    return;
   currentPage = page;
   document.getElementById("sidebar").classList.remove("open");
   buildNav();
@@ -353,6 +407,7 @@ function render() {
       terms: "Terms & Conditions",
       reports: "Reports & Analytics",
       workers: "Worker Management",
+      payroll: "Weekly Payroll",
     }[currentPage] || "Dashboard";
   document.getElementById("pageTitle").textContent = title;
   const c = document.getElementById("content");
@@ -371,6 +426,8 @@ function render() {
   else if (currentPage === "reports") c.innerHTML = reportsPage();
   else if (currentPage === "workers" && session.role === "admin")
     c.innerHTML = workersPage();
+  else if (currentPage === "payroll" && session.role === "admin")
+    c.innerHTML = payrollPage();
   bindPage();
 }
 function farmerDashboard() {
@@ -1414,6 +1471,13 @@ function saveCompletion(id) {
     toast("Only confirmed bookings can be completed.", "error");
     return;
   }
+  if (isBookingPaid(b.id)) {
+    toast(
+      "This booking is already in a paid payroll. Undo that payroll entry first (Payroll page) before changing its hectares.",
+      "error",
+    );
+    return;
+  }
   const raw = String(document.getElementById("doneHa")?.value || "").trim(),
     ha = Number(raw);
   if (!raw) {
@@ -1448,6 +1512,7 @@ function saveCompletion(id) {
     const p = db.payments.find((x) => x.bookingId === b.id);
     if (p) p.amount = b.total;
   }
+  snapshotPayroll(b);
   addNotification(
     b.userId,
     "Order Confirmation",
@@ -1621,6 +1686,417 @@ function viewWorker(id) {
   showModal(
     `<div class="modal-head"><h2>${escapeHtml(w.name)}</h2><button class="close" onclick="closeModal()">✕</button></div><div class="details"><div><b>Role</b><br>${escapeHtml(w.role)}</div><div><b>Status</b><br>${w.status}</div><div><b>Phone</b><br>${escapeHtml(w.phone || "-")}</div><div><b>Completed jobs</b><br>${s.completed}</div><div><b>Upcoming assignments</b><br>${s.upcoming}</div><div><b>Total earnings (finalized)</b><br>${money(s.earnings)}</div></div>${s.pendingRate ? `<div class="notice" style="margin-bottom:12px">Some completed tractor jobs have no commission yet because the tractor rate is Not Set.</div>` : ""}<h3 style="margin:10px 0">Assigned Bookings</h3>${rows ? `<div class="table-wrap"><table class="data-table compact"><thead><tr><th>Booking</th><th>Service</th><th>Date</th><th>Role</th><th>Ha</th><th>Status</th><th>Earnings</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<div class="empty">No assigned bookings yet.</div>`}<div class="card-actions"><button class="secondary-btn" onclick="closeModal()">CLOSE</button></div>`,
   );
+}
+
+/* =====================================================================
+   WEEKLY PAYROLL (admin) — per-date record of who worked, their rates and pay.
+   Week = Monday–Sunday, grouped by the booking's service date.
+   Pay lines are saved on the booking when it is completed, so later rate
+   changes or crew edits cannot rewrite past payroll.
+   ===================================================================== */
+let payrollWeek = null;
+function payPad(n) {
+  return String(n).padStart(2, "0");
+}
+function payYmd(d) {
+  return (
+    d.getFullYear() + "-" + payPad(d.getMonth() + 1) + "-" + payPad(d.getDate())
+  );
+}
+function payParse(s) {
+  const [y, m, d] = String(s).split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+function payAddDays(s, n) {
+  const d = payParse(s);
+  d.setDate(d.getDate() + n);
+  return payYmd(d);
+}
+function payWeekStart(s) {
+  const d = payParse(s);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return payYmd(d);
+}
+function payFmt(s, long) {
+  return payParse(s).toLocaleDateString(
+    "en-PH",
+    long
+      ? { weekday: "long", month: "long", day: "numeric", year: "numeric" }
+      : { month: "short", day: "numeric", year: "numeric" },
+  );
+}
+function payCurrentWeek() {
+  return payrollWeek || payWeekStart(payYmd(new Date()));
+}
+function payRange(ws) {
+  return payFmt(ws) + " – " + payFmt(payAddDays(ws, 6));
+}
+function snapshotPayroll(b) {
+  const c = commissionsFor(b, b.completedHa);
+  b.payroll = {
+    ha: b.completedHa,
+    fee: c.fee,
+    lines: c.lines
+      .filter((l) => l.workerId)
+      .map((l) => ({
+        workerId: l.workerId,
+        role: l.role,
+        rate: l.rate,
+        amount: l.amount,
+      })),
+    at: new Date().toISOString(),
+  };
+}
+// Saved lines when complete; otherwise (older bookings / tractor rate not set yet) computed live.
+function payrollFor(b) {
+  if (b.payroll && b.payroll.lines.every((l) => l.amount != null))
+    return b.payroll;
+  const c = commissionsFor(b, b.completedHa);
+  return {
+    ha: b.completedHa,
+    fee: c.fee,
+    lines: c.lines.filter((l) => l.workerId),
+  };
+}
+function backfillPayroll() {
+  let changed = false;
+  db.bookings.forEach((b) => {
+    if (b.status !== "Completed" || b.payroll || b.completedHa == null) return;
+    if (!crewIds(b).length) return;
+    const c = commissionsFor(b, b.completedHa);
+    if (c.lines.some((l) => l.workerId && l.amount == null)) return;
+    snapshotPayroll(b);
+    changed = true;
+  });
+  if (changed) save();
+}
+function isLinePaid(workerId, bookingId) {
+  return db.payroll.some(
+    (p) => p.workerId === workerId && p.bookingIds.includes(bookingId),
+  );
+}
+function isBookingPaid(bookingId) {
+  return db.payroll.some((p) => p.bookingIds.includes(bookingId));
+}
+function payrollLines(ws) {
+  const end = payAddDays(ws, 6),
+    out = [];
+  db.bookings
+    .filter((b) => b.status === "Completed" && b.date >= ws && b.date <= end)
+    .forEach((b) => {
+      const p = payrollFor(b),
+        e = db.equipment.find((x) => x.id === b.equipmentId),
+        u = db.users.find((x) => x.id === b.userId);
+      p.lines.forEach((l) =>
+        out.push({
+          bookingId: b.id,
+          code: b.code,
+          date: b.date,
+          customer: u?.fullName || "Unknown",
+          equipment: e?.name || "",
+          workerId: l.workerId,
+          role: l.role,
+          rate: l.rate,
+          ha: p.ha,
+          fee: p.fee,
+          amount: l.amount,
+          paid: isLinePaid(l.workerId, b.id),
+        }),
+      );
+    });
+  return out.sort(
+    (a, b) => a.date.localeCompare(b.date) || a.code.localeCompare(b.code),
+  );
+}
+function payrollByWorker(lines) {
+  const m = {};
+  lines.forEach((l) => {
+    const w = (m[l.workerId] = m[l.workerId] || {
+      workerId: l.workerId,
+      lines: [],
+      days: new Set(),
+      jobs: 0,
+      ha: 0,
+      total: 0,
+      paidTotal: 0,
+      unpaidTotal: 0,
+      hasNull: false,
+    });
+    w.lines.push(l);
+    w.days.add(l.date);
+    w.jobs++;
+    w.ha = r2(w.ha + (Number(l.ha) || 0));
+    if (l.amount == null) w.hasNull = true;
+    else {
+      w.total = r2(w.total + l.amount);
+      if (l.paid) w.paidTotal = r2(w.paidTotal + l.amount);
+      else w.unpaidTotal = r2(w.unpaidTotal + l.amount);
+    }
+  });
+  return Object.values(m).sort((a, b) =>
+    workerName(a.workerId).localeCompare(workerName(b.workerId)),
+  );
+}
+function payStatusBadge(w) {
+  const paid = w.lines.filter((l) => l.paid).length;
+  if (paid === w.lines.length) return `<span class="badge green">Paid</span>`;
+  if (paid === 0) return `<span class="badge yellow">Unpaid</span>`;
+  return `<span class="badge blue">Partly paid</span>`;
+}
+function payRateText(l) {
+  return l.rate == null ? "Not Set" : l.rate + "%";
+}
+function payAmountText(l) {
+  return l.amount == null ? "Not Set" : money(l.amount);
+}
+function payrollPage() {
+  const ws = payCurrentWeek(),
+    end = payAddDays(ws, 6),
+    lines = payrollLines(ws),
+    workers = payrollByWorker(lines),
+    jobCount = new Set(lines.map((l) => l.bookingId)).size,
+    total = r2(workers.reduce((s, w) => s + w.total, 0)),
+    paid = r2(workers.reduce((s, w) => s + w.paidTotal, 0)),
+    unpaid = r2(workers.reduce((s, w) => s + w.unpaidTotal, 0)),
+    waiting = db.bookings.filter(
+      (b) => b.status === "Confirmed" && b.date >= ws && b.date <= end,
+    ).length;
+  const dates = [...new Set(lines.map((l) => l.date))];
+  const daily = dates
+    .map((d) => {
+      const dl = lines.filter((l) => l.date === d),
+        dayTotal = r2(dl.reduce((s, l) => s + (l.amount || 0), 0)),
+        jobs = new Set(dl.map((l) => l.bookingId)).size;
+      return `<div class="pay-day"><div class="section-head" style="margin:20px 0 8px"><div><h3>${payFmt(d, true)}</h3><p>${jobs} completed job(s)</p></div><b>${money(dayTotal)}</b></div><div class="table-wrap"><table class="data-table compact"><thead><tr><th>Booking</th><th>Customer</th><th>Equipment</th><th>Role</th><th>Worker</th><th>Hectares</th><th>Rate</th><th>Earnings</th><th>Status</th></tr></thead><tbody>${dl
+        .map(
+          (l) =>
+            `<tr><td><b>${l.code}</b></td><td>${escapeHtml(l.customer)}</td><td>${escapeHtml(l.equipment)}</td><td>${escapeHtml(l.role)}</td><td>${escapeHtml(workerName(l.workerId))}</td><td>${l.ha}</td><td>${payRateText(l)}</td><td><b>${payAmountText(l)}</b></td><td>${l.paid ? `<span class="badge green">Paid</span>` : `<span class="badge yellow">Unpaid</span>`}</td></tr>`,
+        )
+        .join("")}</tbody></table></div></div>`;
+    })
+    .join("");
+  const summary = workers
+    .map((w) => {
+      const wk = db.workers.find((x) => x.id === w.workerId),
+        hasPaid = w.lines.some((l) => l.paid),
+        hasUnpaid = w.lines.some((l) => !l.paid);
+      return `<tr><td><b>${escapeHtml(workerName(w.workerId))}</b></td><td>${escapeHtml(wk?.role || "")}</td><td>${w.days.size}</td><td>${w.jobs}</td><td>${w.ha}</td><td><b>${money(w.total)}</b>${w.hasNull ? `<br><small style="color:var(--muted)">+ tractor rate Not Set</small>` : ""}</td><td>${payStatusBadge(w)}</td><td class="no-print"><div class="card-actions" style="margin:0"><button class="secondary-btn" onclick="payslip(${w.workerId},'${ws}')">PAYSLIP</button>${hasUnpaid ? `<button class="primary-btn" onclick="payrollPayWorker(${w.workerId},'${ws}')">MARK PAID</button>` : ""}${hasPaid ? `<button class="danger-btn" onclick="payrollUndo(${w.workerId},'${ws}')">UNDO</button>` : ""}</div></td></tr>`;
+    })
+    .join("");
+  return `<div class="toolbar no-print" style="align-items:center">
+<button class="secondary-btn" onclick="payrollShift(-1)">◀ Previous</button>
+<div class="pay-week-label">${payRange(ws)}</div>
+<button class="secondary-btn" onclick="payrollShift(1)">Next ▶</button>
+<input type="date" value="${ws}" onchange="payrollGoto(this.value)" title="Jump to the week containing this date">
+<button class="secondary-btn" onclick="payrollGoto('')">This week</button>
+<span style="flex:1"></span>
+<button class="secondary-btn" onclick="payrollExport()">⬇ Export CSV</button>
+<button class="secondary-btn" onclick="payrollPrint()">🖨 Print</button>
+<button class="primary-btn" onclick="payrollPayAll()">MARK WEEK AS PAID</button>
+</div>
+<div id="payrollArea">
+<div class="print-only"><h2>Dizon Farm Equipment — Weekly Payroll</h2><p>${payRange(ws)} (Monday–Sunday, by service date)</p></div>
+<div class="stats"><div class="stat"><small>Total Payroll</small><h3>${money(total)}</h3></div><div class="stat"><small>Paid</small><h3>${money(paid)}</h3></div><div class="stat"><small>Unpaid</small><h3>${money(unpaid)}</h3></div><div class="stat"><small>Completed Jobs</small><h3>${jobCount}</h3></div></div>
+${waiting ? `<div class="notice no-print" style="margin-bottom:14px">${waiting} confirmed booking(s) this week are not completed yet, so they are not in the payroll. Complete them in Manage Bookings first.</div>` : ""}
+<div class="section-head"><div><h3>Weekly Summary per Worker</h3><p>You decide when a worker's week is payroll: press MARK PAID once you have paid them. UNDO reverses it.</p></div></div>
+${workers.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Worker</th><th>Role</th><th>Days Worked</th><th>Jobs</th><th>Hectares</th><th>Total Pay</th><th>Status</th><th class="no-print">Action</th></tr></thead><tbody>${summary}</tbody><tfoot><tr><td colspan="5">Total</td><td colspan="3">${money(total)}</td></tr></tfoot></table></div>` : `<div class="empty">No completed jobs with assigned workers for this week.</div>`}
+${daily ? `<div class="section-head" style="margin-top:30px"><div><h3>Daily Record</h3><p>Who worked on each date, their rate and what they earned.</p></div></div>${daily}` : ""}
+</div>`;
+}
+function payrollShift(n) {
+  payrollWeek = payAddDays(payCurrentWeek(), 7 * n);
+  render();
+}
+function payrollGoto(v) {
+  payrollWeek = v ? payWeekStart(v) : null;
+  render();
+}
+// Marks every unpaid line of one worker's week as paid; returns the amount, or null if nothing/blocked.
+function payWorkerWeek(workerId, ws) {
+  const unpaid = payrollLines(ws).filter(
+    (l) => l.workerId === workerId && !l.paid,
+  );
+  if (!unpaid.length || unpaid.some((l) => l.amount == null)) return null;
+  const amt = r2(unpaid.reduce((s, l) => s + l.amount, 0));
+  let rec = db.payroll.find(
+    (p) => p.workerId === workerId && p.weekStart === ws,
+  );
+  if (!rec) {
+    rec = {
+      id: Date.now() + Math.floor(Math.random() * 10000),
+      workerId,
+      weekStart: ws,
+      bookingIds: [],
+      amount: 0,
+      paidAt: null,
+    };
+    db.payroll.push(rec);
+  }
+  unpaid.forEach((l) => rec.bookingIds.push(l.bookingId));
+  rec.amount = r2(rec.amount + amt);
+  rec.paidAt = new Date().toISOString();
+  return amt;
+}
+function payrollPayWorker(workerId, ws) {
+  if (!requireAdmin("mark payroll as paid")) return;
+  const unpaid = payrollLines(ws).filter(
+    (l) => l.workerId === workerId && !l.paid,
+  );
+  if (unpaid.some((l) => l.amount == null)) {
+    toast(
+      "Cannot mark as paid: the tractor commission rate is Not Set. Set it under Workers first.",
+      "error",
+    );
+    return;
+  }
+  const amt = r2(unpaid.reduce((s, l) => s + l.amount, 0));
+  if (
+    !confirm(
+      `Mark ${money(amt)} as paid to ${workerName(workerId)} for ${payRange(ws)}?`,
+    )
+  )
+    return;
+  payWorkerWeek(workerId, ws);
+  save();
+  toast("Marked as paid.");
+  render();
+}
+function payrollPayAll() {
+  if (!requireAdmin("mark payroll as paid")) return;
+  const ws = payCurrentWeek(),
+    ws2 = payrollByWorker(payrollLines(ws)).filter(
+      (w) => w.unpaidTotal > 0 || w.lines.some((l) => !l.paid),
+    );
+  const payable = ws2.filter(
+    (w) =>
+      w.lines.some((l) => !l.paid) &&
+      !w.lines.some((l) => !l.paid && l.amount == null),
+  );
+  if (!payable.length) {
+    toast("Nothing unpaid to mark for this week.", "error");
+    return;
+  }
+  const amt = r2(payable.reduce((s, w) => s + w.unpaidTotal, 0));
+  if (
+    !confirm(
+      `Mark ${money(amt)} as paid to ${payable.length} worker(s) for ${payRange(ws)}?`,
+    )
+  )
+    return;
+  payable.forEach((w) => payWorkerWeek(w.workerId, ws));
+  save();
+  const skipped = ws2.length - payable.length;
+  toast(
+    skipped
+      ? `Marked paid. ${skipped} worker(s) skipped (tractor rate Not Set).`
+      : "Week marked as paid.",
+  );
+  render();
+}
+function payrollUndo(workerId, ws) {
+  if (!requireAdmin("undo payroll")) return;
+  const rec = db.payroll.find(
+    (p) => p.workerId === workerId && p.weekStart === ws,
+  );
+  if (!rec) return;
+  if (
+    !confirm(
+      `Undo the paid status (${money(rec.amount)}) for ${workerName(workerId)}, ${payRange(ws)}?`,
+    )
+  )
+    return;
+  db.payroll = db.payroll.filter((p) => p !== rec);
+  save();
+  toast("Payroll entry undone.");
+  render();
+}
+function payslip(workerId, ws) {
+  if (!requireAdmin("view payslips")) return;
+  const w = payrollByWorker(payrollLines(ws)).find(
+    (x) => x.workerId === workerId,
+  );
+  if (!w) return;
+  const wk = db.workers.find((x) => x.id === workerId),
+    rec = db.payroll.find((p) => p.workerId === workerId && p.weekStart === ws),
+    rows = w.lines
+      .map(
+        (l) =>
+          `<tr><td>${payFmt(l.date)}</td><td><b>${l.code}</b></td><td>${escapeHtml(l.customer)}</td><td>${escapeHtml(l.role)}</td><td>${l.ha}</td><td>${payRateText(l)}</td><td><b>${payAmountText(l)}</b></td></tr>`,
+      )
+      .join("");
+  showModal(
+    `<div class="modal-head"><h2>Payslip</h2><button class="close no-print" onclick="closeModal()">✕</button></div>
+<div class="details"><div><b>Worker</b><br>${escapeHtml(workerName(workerId))}</div><div><b>Role</b><br>${escapeHtml(wk?.role || "")}</div><div><b>Period</b><br>${payRange(ws)}</div><div><b>Status</b><br>${payStatusBadge(w)}${rec?.paidAt ? `<br><small>Paid ${payFmt(payYmd(new Date(rec.paidAt)))}</small>` : ""}</div></div>
+<div class="table-wrap"><table class="data-table compact"><thead><tr><th>Date</th><th>Booking</th><th>Customer</th><th>Role</th><th>Ha</th><th>Rate</th><th>Earnings</th></tr></thead><tbody>${rows}</tbody><tfoot><tr><td colspan="6">Total (${w.days.size} day(s) worked)</td><td>${money(w.total)}</td></tr></tfoot></table></div>
+<div style="display:flex;justify-content:space-between;margin-top:36px;font-size:12px;color:var(--muted)"><span>Prepared by: ____________________</span><span>Received by: ____________________</span></div>
+<div class="card-actions no-print"><button class="primary-btn" onclick="payslipPrint()">🖨 PRINT</button><button class="secondary-btn" onclick="closeModal()">CLOSE</button></div>`,
+  );
+}
+function payPrintWith(cls) {
+  document.body.classList.add(cls);
+  window.addEventListener(
+    "afterprint",
+    () => document.body.classList.remove(cls),
+    { once: true },
+  );
+  setTimeout(() => window.print(), 50);
+}
+function payrollPrint() {
+  payPrintWith("printing-week");
+}
+function payslipPrint() {
+  payPrintWith("printing-slip");
+}
+function payrollExport() {
+  if (!requireAdmin("export payroll")) return;
+  const ws = payCurrentWeek(),
+    lines = payrollLines(ws);
+  if (!lines.length) {
+    toast("No payroll records to export for this week.", "error");
+    return;
+  }
+  const cell = (v) => '"' + String(v ?? "").replace(/"/g, '""') + '"',
+    rows = [
+      [
+        "Date",
+        "Booking",
+        "Customer",
+        "Equipment",
+        "Worker",
+        "Role",
+        "Hectares",
+        "Rate %",
+        "Service Fee",
+        "Earnings",
+        "Status",
+      ],
+      ...lines.map((l) => [
+        l.date,
+        l.code,
+        l.customer,
+        l.equipment,
+        workerName(l.workerId),
+        l.role,
+        l.ha,
+        l.rate ?? "Not Set",
+        l.fee,
+        l.amount ?? "Not Set",
+        l.paid ? "Paid" : "Unpaid",
+      ]),
+    ];
+  const blob = new Blob(
+      ["\uFEFF" + rows.map((r) => r.map(cell).join(",")).join("\r\n")],
+      {
+        type: "text/csv;charset=utf-8",
+      },
+    ),
+    a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `payroll_${ws}_to_${payAddDays(ws, 6)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 init();
